@@ -98,11 +98,19 @@ class _WSNConstruction(Construction):
 class WSNClusterHeadProblem(SubsetProblem):
     """Wybor k CH sposrod n wezlow. Kazdy pozostaly wezel nadaje do najblizszego CH.
 
-    f = sum_i E_TX(d_i) + sum_j E_CH,j + w * max_j E_CH,j + kara * (sum_i max(0, d_i - d0)/d0 + #niepokrytych)
+    f = sum_i E_TX(d_i) + (sum_j E_CH,j) / J + (-3 ln x) * sum_j max(0, E_CH,j - (mediana + IQR))
+        + kara * (sum_i max(0, d_i - d0)/d0 + #niepokrytych)
 
     gdzie E_CH,j = m_j*l*E_elec = m_j*E_RX (Eq. 2), a "niepokryty" to wezel dalej niz d0
-    od swojego CH. Brak lacza CH->BS (poza zakresem: routing). Wagi `w` i `kara` sa kalibrowane na
-    rozwiazaniu zachlannym (patrz `_calibrate`), chyba ze podano je jawnie.
+    od swojego CH. J = (sum_j E_CH,j)^2 / (k * sum_j E_CH,j^2) to indeks rownosci obciazen Jaina
+    (Jain, Chiu, Hawe, DEC-TR-301, 1984), J w [1/k, 1]; mnoznik 1/J >= 1 zwieksza koszt odbioru w CH
+    tym bardziej, im mniej rowne sa obciazenia CH. Trzeci czlon karze nadwyzke obciazenia kazdego CH
+    ponad prog odporny na outliery, mediana + IQR (IQR = Q3 - Q1, po wszystkich k CH, w tym pustych),
+    bo Jain nie pilnuje pojedynczego przeciazonego CH; x = (liczba CH ponad progiem) / k, wiec waga
+    -3 ln x = 3 ln(k/m) jest najwieksza dla pojedynczego odstajacego CH (m = 0 daje czlon 0; patrz
+    `_overload`). Brak lacza CH->BS
+    (poza zakresem: routing). Waga `kara` jest kalibrowana na rozwiazaniu zachlannym (patrz
+    `_calibrate`), chyba ze podano ja jawnie.
     """
 
     def __init__(
@@ -112,7 +120,6 @@ class WSNClusterHeadProblem(SubsetProblem):
         side: float,
         radio: RadioModel | None = None,
         name: str = "wsn",
-        w_balance: float | None = None,
         penalty: float | None = None,
     ) -> None:
         self.name = name
@@ -131,10 +138,9 @@ class WSNClusterHeadProblem(SubsetProblem):
         # This weights are going to be applied in the heuristic function, they tell wether this node is more attractive
         self._weights = np.clip(1.0 - self.dist / self.d0, 0.0, None)
         self._adj_cache: dict[float, np.ndarray] = {}
-        self.w_balance = 0.0
         self.penalty = 0.0
         self._reference = self._greedy_reference()
-        self._calibrate(w_balance, penalty)
+        self._calibrate(penalty)
 
     # ------------------------------------------------------------------ funkcja celu
     def _terms(self, solution: np.ndarray) -> tuple[float, np.ndarray, float]:
@@ -153,9 +159,33 @@ class WSNClusterHeadProblem(SubsetProblem):
         violation = float(excess.sum() / self.d0 + (excess > 0).sum()) # penalty, we count there the excess, which means the commulative sum of all nodes working in multipath mode. The minimum violation is atleast one due to the counting of the nodes being to far from the CH
         return e_members, e_ch, violation
 
+    def _jain(self, e_ch: np.ndarray) -> float:
+        """Indeks rownosci obciazen Jaina po wszystkich k CH (pusty CH ma obciazenie 0): (sum x)^2 / (k * sum x^2).
+        Przyjmuje wartosci z [1/k, 1]; 1 = rowne obciazenia. Gdy obciazenie wszystkich CH jest zerowe (n == k), zwraca 1."""
+        sq = float((e_ch**2).sum())
+        if sq == 0.0:
+            return 1.0
+        return float(e_ch.sum()) ** 2 / (self.k * sq)
+
+    @staticmethod
+    def _overload(e_ch: np.ndarray) -> float:
+        """Kara za przeciazone CH: (-3*ln x) * sum_j max(0, E_CH,j - (mediana + IQR)), x = m / k, gdzie m to liczba CH
+        ponad progiem. Rownowaznie 3*ln(k/m) * nadwyzka: im mniej CH jest przeciazonych, tym wieksza waga nadwyzki
+        (pojedynczy odstajacy CH jest karany najmocniej). Gdy zaden CH nie przekracza progu (m = 0), czlon = 0
+        (x = 0 dawaloby 0 * inf). Mediana i kwartyle (interpolacja liniowa) po wszystkich k CH, w tym pustych;
+        wynik w dzulach. CH uznajemy za przeciazony, gdy przekracza prog o wiecej niz 1e-9 * max(E_CH), zeby blad
+        zaokraglenia nie zmienial m (a z nim wagi calego czlonu)."""
+        q1, med, q3 = np.percentile(e_ch, [25, 50, 75])
+        excess = e_ch - (med + (q3 - q1))
+        over = excess > 1e-9 * float(e_ch.max())
+        n_over = int(over.sum())
+        if n_over == 0:
+            return 0.0
+        return 3.0 * math.log(len(e_ch) / n_over) * float(excess[over].sum())
+
     def evaluate(self, solution: np.ndarray) -> float:
         e_members, e_ch, violation = self._terms(solution)
-        return e_members + float(e_ch.sum()) + self.w_balance * float(e_ch.max()) + self.penalty * violation
+        return e_members + float(e_ch.sum()) / self._jain(e_ch) + self._overload(e_ch) + self.penalty * violation
 
     def is_feasible(self, solution: np.ndarray) -> bool:
         return self._terms(solution)[2] == 0.0
@@ -200,13 +230,8 @@ class WSNClusterHeadProblem(SubsetProblem):
             dmin = np.minimum(dmin, self.dist[:, node])
         return np.array(chosen, dtype=np.int64)
 
-    def _calibrate(self, w_balance: float | None, penalty: float | None) -> None:
-        """w: czlon bilansu rowny czlonowi zwartosci (zmienna czesc energii nadawania) na referencji.
-        kara: f(referencji), wiec kazde rozwiazanie niedopuszczalne (kara >= f_ref) jest gorsze od referencji."""
-        e_members, e_ch, _ = self._terms(self._reference)
-        bits = self.radio.packet_bits
-        variable = e_members - (self.n - self.k) * bits * self.radio.e_elec
-        self.w_balance = float(variable / e_ch.max()) if w_balance is None else float(w_balance)
+    def _calibrate(self, penalty: float | None) -> None:
+        """kara: f(referencji), wiec kazde rozwiazanie niedopuszczalne (kara >= f_ref) jest gorsze od referencji."""
         if penalty is None:
             self.penalty = 0.0
             self.penalty = self.evaluate(self._reference)
@@ -224,8 +249,9 @@ class WSNClusterHeadProblem(SubsetProblem):
             "e_elec": self.radio.e_elec,
             "eps_fs": self.radio.eps_fs,
             "eps_mp": self.radio.eps_mp,
-            "w_balance": self.w_balance,
             "penalty": self.penalty,
+            "jain_reference": self._jain(self._terms(self._reference)[1]),
+            "overload_reference": self._overload(self._terms(self._reference)[1]),
             "reference_f": self.evaluate(self._reference),
             "reference_feasible": self.is_feasible(self._reference),
         }

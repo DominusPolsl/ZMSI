@@ -45,10 +45,6 @@ def _set(algo: str, set_id: str, **params) -> ParameterSet:
     return ParameterSet(set_id=set_id, algo=algo, params=tuple(params.items()))
 
 
-def _fmt(v: object) -> str:
-    return "inf" if isinstance(v, float) and math.isinf(v) else str(v)
-
-
 def _oat(algo: str, base: dict, variants: dict[str, tuple]) -> list[ParameterSet]:
     """Zestawy 'one-at-a-time': baza + warianty zmieniajace po jednym parametrze."""
     sets = [_set(algo, "base", **base)]
@@ -56,7 +52,7 @@ def _oat(algo: str, base: dict, variants: dict[str, tuple]) -> list[ParameterSet
         for value in values:
             if value == base[name]:
                 continue
-            sets.append(_set(algo, f"{name}={_fmt(value)}", **{**base, name: value}))
+            sets.append(_set(algo, f"{name}={value}", **{**base, name: value}))
     return sets
 
 

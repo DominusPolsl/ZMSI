@@ -7,6 +7,7 @@ Zwykle skrypty z `assert`, bez frameworka testowego. Uruchomienie:
 from __future__ import annotations
 
 import math
+import statistics
 import traceback
 
 import numpy as np
@@ -24,8 +25,8 @@ def check_objective_by_hand() -> None:
     """Funkcja celu na 4 wezlach zgodna z niezalezna reczna implementacja."""
     radio = RadioModel()
     pos = np.array([[0.0, 0.0], [30.0, 0.0], [200.0, 0.0], [230.0, 0.0]])
-    w, pen = 1.5, 10.0
-    problem = WSNClusterHeadProblem(pos, k=2, side=300.0, radio=radio, w_balance=w, penalty=pen)
+    pen = 10.0
+    problem = WSNClusterHeadProblem(pos, k=2, side=300.0, radio=radio, penalty=pen)
     l, d0 = radio.packet_bits, radio.d0
 
     def tx(d: float) -> float:
@@ -45,12 +46,62 @@ def check_objective_by_hand() -> None:
             if dists[c] > d0:
                 violation += (dists[c] - d0) / d0 + 1
         e_ch = [len(m) * l * radio.e_elec for m in members.values()]
-        return total_tx + sum(e_ch) + w * max(e_ch) + pen * violation
+        jain = sum(e_ch) ** 2 / (len(chs) * sum(x * x for x in e_ch))  # Jain 1984, po wszystkich k CH
+        q1, _, q3 = statistics.quantiles(e_ch, n=4, method="inclusive")  # = interpolacja liniowa numpy
+        threshold = statistics.median(e_ch) + (q3 - q1)
+        over = [x - threshold for x in e_ch if x - threshold > 1e-9 * max(e_ch)]  # nadwyzki CH ponad progiem
+        overload = 3.0 * math.log(len(e_ch) / len(over)) * sum(over) if over else 0.0  # (-3 ln x) * nadwyzka, x = m/k
+        return total_tx + sum(e_ch) / jain + overload + pen * violation
 
     for chs in ([0, 2], [0, 1], [1, 3], [0, 3]):
         got, want = problem.evaluate(np.array(chs)), by_hand(chs)
         assert math.isclose(got, want, rel_tol=1e-12), (chs, got, want)
     assert problem.is_feasible(np.array([0, 2])) and not problem.is_feasible(np.array([0, 1]))
+
+
+def check_jain_factor() -> None:
+    """Indeks Jaina: 1 dla rownych obciazen, 1/k gdy caly ruch w jednym CH, zawsze w [1/k, 1]."""
+    problem = get_problem("main")
+    k = problem.k
+    assert math.isclose(problem._jain(np.full(k, 3.0)), 1.0)
+    one = np.zeros(k)
+    one[0] = 7.0
+    assert math.isclose(problem._jain(one), 1.0 / k)
+    assert problem._jain(np.zeros(k)) == 1.0  # n == k: brak czlonkow, mnoznik neutralny
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        e = rng.random(k) * rng.integers(0, 2, k)  # czesc CH pusta
+        if e.sum() == 0.0:
+            continue
+        j = problem._jain(e)
+        assert 1.0 / k - 1e-12 <= j <= 1.0 + 1e-12
+        # mnoznik 1/J na sumie E_CH rowna sie k * sum(E^2) / sum(E)
+        assert math.isclose(e.sum() / j, k * (e**2).sum() / e.sum(), rel_tol=1e-12)
+
+
+def check_overload_term() -> None:
+    """Kara (-3 ln x) * nadwyzka ponad (mediana + IQR), x = m/k: 0 gdy nic nie przekracza progu, nieujemna, skonczona."""
+    problem = get_problem("main")
+    lE = problem.radio.packet_bits * problem.radio.e_elec
+    assert math.isclose(problem._overload(np.full(problem.k, 3.0 * lE)), 0.0, abs_tol=1e-18)
+    # k = 5: mediana = Q1 = Q3 = 1 (IQR 0), prog 1, jeden CH (10) ponad progiem, nadwyzka 9: 3 ln(5/1) * 9
+    assert math.isclose(problem._overload(lE * np.array([1.0, 1.0, 1.0, 1.0, 10.0])), 3.0 * math.log(5.0) * 9.0 * lE, rel_tol=1e-12)
+    # wiecej niz polowa CH pusta: prog 0, jeden CH (5) ponad progiem: 3 ln(5/1) * 5
+    assert math.isclose(problem._overload(lE * np.array([0.0, 0.0, 0.0, 0.0, 5.0])), 3.0 * math.log(5.0) * 5.0 * lE, rel_tol=1e-12)
+    # CH dokladnie na progu nie jest przeciazony (odpornosc na bledy zaokraglen): [1..5] ma prog 3 + 2 = 5
+    assert math.isclose(problem._overload(lE * np.array([1.0, 2.0, 3.0, 4.0, 5.0])), 0.0, abs_tol=1e-18)
+    # k = 60: 59 CH po 2 i jeden 3 (mediana = Q1 = Q3 = 2): jeden przeciazony, nadwyzka 1: 3 ln(60) * 1
+    one = lE * np.array([2.0] * 59 + [4.0])  # jeden CH, nadwyzka 2
+    assert math.isclose(problem._overload(lE * np.array([2.0] * 59 + [3.0])), 3.0 * math.log(60.0) * lE, rel_tol=1e-12)
+    assert math.isclose(problem._overload(one), 3.0 * math.log(60.0) * 2.0 * lE, rel_tol=1e-12)
+    # ta sama nadwyzka (2) rozlozona na dwa CH jest karana slabiej: waga 3 ln(60/2) < 3 ln(60/1)
+    two = lE * np.array([2.0] * 58 + [3.0, 3.0])
+    assert math.isclose(problem._overload(two), 3.0 * math.log(30.0) * 2.0 * lE, rel_tol=1e-12)
+    assert problem._overload(one) > problem._overload(two)
+    rng = np.random.default_rng(0)
+    for _ in range(50):
+        e = rng.random(problem.k) * rng.integers(0, 2, problem.k)  # czesc CH pusta
+        assert problem._overload(e) >= 0.0 and math.isfinite(problem._overload(e))
 
 
 def check_k_and_d0() -> None:
@@ -164,6 +215,8 @@ def check_beats_random_on_main() -> None:
 
 CHECKS = [
     check_objective_by_hand,
+    check_jain_factor,
+    check_overload_term,
     check_k_and_d0,
     check_evaluator_nfe,
     check_solutions_valid_and_nfe,
