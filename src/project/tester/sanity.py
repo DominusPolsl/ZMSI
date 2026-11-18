@@ -189,6 +189,24 @@ def check_statistics() -> None:
     assert s["f_min"] == 1.0 and s["f_max"] == 4.0
 
 
+def check_significance_tests() -> None:
+    """Dokladny test sumy rang, A12 i korekta Holma na przypadkach policzonych recznie."""
+    from project.significance import a12, holm, rank_sum_pvalue
+
+    low, high = [float(v) for v in range(1, 11)], [float(v) for v in range(11, 21)]
+    # w pelni rozdzielone 10 vs 10: tylko dwa skrajne podzialy z C(20,10) = 184756, dwustronnie 2 / C(20,10)
+    assert math.isclose(rank_sum_pvalue(low, high), 2.0 / math.comb(20, 10), rel_tol=1e-12)
+    assert math.isclose(rank_sum_pvalue([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), 2.0 / 20.0)  # 3 vs 3: 2 / C(6,3)
+    assert rank_sum_pvalue([2.0, 2.0, 2.0], [2.0, 2.0, 2.0]) == 1.0  # same rowne wartosci: brak roznicy
+    assert math.isclose(rank_sum_pvalue(low, high), rank_sum_pvalue(high, low))  # symetria
+    # remisy: x = [1, 2], y = [2, 3] -> podwojone rangi 2, 5, 5, 8; sumy podzbiorow 7, 7, 10, 10, 13, 13; E = 10,
+    # |odchylenie| >= 3 w 4 z 6 podzialow
+    assert math.isclose(rank_sum_pvalue([1.0, 2.0], [2.0, 3.0]), 4.0 / 6.0)
+    assert a12(low, high) == 1.0 and a12(high, low) == 0.0 and a12([1.0, 2.0], [1.0, 2.0]) == 0.5
+    # Holm: p = (0,01; 0,04; 0,03) -> (3*0,01; 2*0,03; 1*0,04) po sortowaniu, z monotonizacja: 0,03; 0,06; 0,06
+    assert all(math.isclose(a, b) for a, b in zip(holm([0.01, 0.04, 0.03]), [0.03, 0.06, 0.06]))
+
+
 def check_tiny_against_brute_force() -> None:
     """Na malej instancji metaheurystyki musza znalezc prawdziwe optimum i bic losowe przeszukiwanie."""
     tiny = get_problem("tiny")
@@ -224,6 +242,7 @@ CHECKS = [
     check_reproducibility,
     check_feasible_region_exists,
     check_statistics,
+    check_significance_tests,
     check_tiny_against_brute_force,
     check_beats_random_on_main,
 ]

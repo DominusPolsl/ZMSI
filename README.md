@@ -123,6 +123,7 @@ uv run python -m project.tester.run_experiments --stage summarize --out results/
              results/gcbc_baseline_main results/gcbc_sensitivity_main \
              results/random_baseline_main      # wspólne best-known + wybór najlepszych
 uv run python -m project.plots                                                  # wykresy do results/figures
+uv run python -m project.significance                                           # testy istotności do results/significance
 ```
 
 Szybki przebieg kontrolny: `--runs 3 --n-values 10,20 --i-values 5,10`.
@@ -138,6 +139,15 @@ Opcjonalnie `--max-nfe` ustawia wspólny budżet NFE (porównania przy równym k
 | `meta.json` | wersje, seedy, siatki, opis instancji, kalibrowana kara (`penalty`), indeks Jaina i nadwyżka obciążenia referencji (`jain_reference`, `overload_reference`) |
 
 Seed uruchomienia `r` to `BASE_SEED + r` (`tester/config.py`), taki sam dla wszystkich konfiguracji.
+
+## Testy istotności (`project.significance`)
+
+Przy R = 10 różnice mniejsze niż ok. 1 odchylenie standardowe nie rozstrzygają o przewadze konfiguracji, więc `project.significance`
+liczy dwustronny, **dokładny test permutacyjny sumy rang** (równoważny testowi Manna–Whitneya U, z rangami średnimi przy remisach;
+rozkład liczony programowaniem dynamicznym, bez scipy) oraz miarę efektu A12 Vargha–Delaneya (`> 0,5` = pierwsza konfiguracja lepsza).
+Trzy zestawienia (CSV w `results/significance/`): (a) warianty OAT vs zestaw bazowy przy `ref-n`, `ref-i`, z korektą Holma w obrębie
+algorytmu; (b) ACS vs GC-BC przy tym samym (N, I); (c) ACS vs GC-BC przy zbliżonym NFE (GC-BC ma przy tym samym (N, I) ok. 2× więcej NFE),
+gdzie dla każdej komórki ACS bierzemy najlepszą medianowo komórkę GC-BC z okna NFE, więc wniosek jest ostrożny. Próbki traktujemy jako niezależne.
 
 ## Odstępstwa od instrukcji testowania
 
